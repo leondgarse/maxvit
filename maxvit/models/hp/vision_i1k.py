@@ -84,6 +84,13 @@ class MaxViTLarge(MaxViTI1KBase):
   cfg.model.survival_prob = 0.4
 
 
+@register
+class MaxViTXLarge(vision_i1k.MaxViTI1KBase):
+    cfg = copy.deepcopy(vision_i1k.MaxViTI1KBase.cfg)
+    cfg.model.update(vision.maxvit_xl)
+    cfg.model.survival_prob = 0.4
+
+
 ############################## 1K Finetuning ##############################
 i1k_ft_update = dict(
     dataset='imagenet',
