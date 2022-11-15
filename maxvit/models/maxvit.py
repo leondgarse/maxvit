@@ -148,22 +148,22 @@ class Attention(tf.keras.layers.Layer):
         output_trailing_dims=[self.num_heads, self.head_size],
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='q')
+        name='query')
     self._k_proj = TrailDense(
         output_trailing_dims=[self.num_heads, self.head_size],
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='k')
+        name='key')
     self._v_proj = TrailDense(
         output_trailing_dims=[self.num_heads, self.head_size],
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='v')
+        name='value')
     self._o_proj = TrailDense(
         output_trailing_dims=self.hidden_size, begin_axis=-2,
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='o')
+        name='output')
 
     self.q_scale = self.head_size ** -0.5
 
@@ -214,7 +214,7 @@ class Attention(tf.keras.layers.Layer):
                                   self.rel_attn_type)
 
       self.relative_bias = self.add_weight(
-          'relative_bias',
+          'pos_emb',
           rel_bias_shape,
           initializer=self.kernel_initializer,
           trainable=True)
@@ -232,6 +232,7 @@ class Attention(tf.keras.layers.Layer):
       else:
         relative_bias = tf.cast(self.relative_bias, self.compute_dtype)
 
+      self.__relative_bias__ = relative_bias
       self.reindexed_bias = attn_utils.reindex_2d_einsum_lookup(
           relative_bias, height, width, height - 1, width - 1,
           h_axis=h_axis)
@@ -294,12 +295,12 @@ class FFN(tf.keras.layers.Layer):
         output_trailing_dims=self.expanded_size,
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='expand_dense')
+        name='1_dense')
     self._shrink_dense = TrailDense(
         output_trailing_dims=self.hidden_size,
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='shrink_dense')
+        name='2_dense')
     self._activation_fn = ops.get_act_fn(self.activation)
 
   def call(self, inputs, training):
@@ -471,7 +472,7 @@ class SE(tf.keras.layers.Layer):
         use_bias=True,
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='reduce_conv2d')
+        name='1_conv')
     self._se_expand = tf.keras.layers.Conv2D(
         output_filters,
         kernel_size=[1, 1],
@@ -481,7 +482,7 @@ class SE(tf.keras.layers.Layer):
         use_bias=True,
         kernel_initializer=kernel_initializer,
         bias_initializer=bias_initializer,
-        name='expand_conv2d')
+        name='2_conv')
 
   def call(self, inputs):
     h_axis, w_axis = [2, 3] if self._data_format == 'channels_first' else [1, 2]
@@ -559,7 +560,7 @@ class MBConvBlock(tf.keras.layers.Layer):
       self._shortcut_conv = None
 
     # Pre-Activation norm
-    self._pre_norm = norm_class(name='pre_norm')
+    self._pre_norm = norm_class(name='preact_bn')
 
     # Expansion phase.
     if self._config.expansion_rate != 1:
@@ -573,7 +574,7 @@ class MBConvBlock(tf.keras.layers.Layer):
           data_format=config.data_format,
           use_bias=False,
           name='expand_conv')
-      self._expand_norm = norm_class(name='expand_norm')
+      self._expand_norm = norm_class(name='expand_bn')
 
     # Depth-wise convolution phase.
     self._depthwise_conv = tf.keras.layers.DepthwiseConv2D(
@@ -584,8 +585,8 @@ class MBConvBlock(tf.keras.layers.Layer):
         padding='same',
         data_format=config.data_format,
         use_bias=False,
-        name='depthwise_conv')
-    self._depthwise_norm = norm_class(name='depthwise_norm')
+        name='MB_dw_conv')
+    self._depthwise_norm = norm_class(name='MB_dw_bn')
 
     if config.se_ratio is not None and 0 < config.se_ratio <= 1:
       se_filters = max(1, int(config.hidden_size * config.se_ratio))
@@ -608,7 +609,7 @@ class MBConvBlock(tf.keras.layers.Layer):
         kernel_initializer=config.kernel_initializer,
         bias_initializer=config.bias_initializer,
         use_bias=True,
-        name='shrink_conv')
+        name='MB_pw_conv')
 
   def downsample(self, inputs, name):
     config = self._config
@@ -727,13 +728,13 @@ class MaxViTBlock(tf.keras.layers.Layer):
         axis=-1,
         epsilon=config.ln_epsilon,
         dtype=config.ln_dtype,
-        name='attn_layer_norm')
+        name='block_attn_preact_ln')
 
     self._grid_attn_layer_norm = tf.keras.layers.LayerNormalization(
         axis=-1,
         epsilon=config.ln_epsilon,
         dtype=config.ln_dtype,
-        name='attn_layer_norm_1')
+        name='grid_attn_preact_ln')
 
     self._block_attention = Attention(
         config.hidden_size,
@@ -744,7 +745,7 @@ class MaxViTBlock(tf.keras.layers.Layer):
         scale_ratio=config.scale_ratio,
         kernel_initializer=config.kernel_initializer,
         bias_initializer=config.bias_initializer,
-        name='attention')
+        name='block_window_mhsa')
 
     self._grid_attention = Attention(
         config.hidden_size,
@@ -755,19 +756,19 @@ class MaxViTBlock(tf.keras.layers.Layer):
         scale_ratio=config.scale_ratio,
         kernel_initializer=config.kernel_initializer,
         bias_initializer=config.bias_initializer,
-        name='attention_1')
+        name='grid_window_mhsa')
 
     self._block_ffn_layer_norm = tf.keras.layers.LayerNormalization(
         axis=-1,
         epsilon=config.ln_epsilon,
         dtype=config.ln_dtype,
-        name='ffn_layer_norm')
+        name='block_ffn_preact_ln')
 
     self._grid_ffn_layer_norm = tf.keras.layers.LayerNormalization(
         axis=-1,
         epsilon=config.ln_epsilon,
         dtype=config.ln_dtype,
-        name='ffn_layer_norm_1')
+        name='grid_ffn_preact_ln')
 
     self._block_ffn = FFN(
         config.hidden_size,
@@ -776,7 +777,7 @@ class MaxViTBlock(tf.keras.layers.Layer):
         activation=config.activation,
         kernel_initializer=config.kernel_initializer,
         bias_initializer=config.bias_initializer,
-        name='ffn')
+        name='block_ffn')
 
     self._grid_ffn = FFN(
         config.hidden_size,
@@ -785,9 +786,10 @@ class MaxViTBlock(tf.keras.layers.Layer):
         activation=config.activation,
         kernel_initializer=config.kernel_initializer,
         bias_initializer=config.bias_initializer,
-        name='ffn_1')
+        name='grid_ffn')
 
     self._mbconv = MBConvBlock(config)
+
 
   def downsample(self, inputs, name):
     config = self._config
@@ -1136,10 +1138,10 @@ class MaxViT(tf.keras.layers.Layer):
           kernel_initializer=self._config.kernel_initializer,
           bias_initializer=self._config.bias_initializer,
           use_bias=True,
-          name='conv_{}'.format(i))
+          name='stem_{}_conv'.format(i + 1))
       stem_layers.append(conv_layer)
       if i < len(self._config.stem_hsize) - 1:
-        stem_layers.append(bn_class(name='norm_{}'.format(i)))
+        stem_layers.append(bn_class(name='stem_{}_bn'.format(i + 1)))
         stem_layers.append(tf.keras.layers.Activation(
             ops.get_act_fn(self._config.activation), name='act_{}'.format(i)))
     self._stem = tf.keras.Sequential(
@@ -1155,7 +1157,7 @@ class MaxViT(tf.keras.layers.Layer):
       config_s = self._local_config(self._config, i, '^stem.*')
       for j in range(config_s.num_blocks):
         # block name
-        block_name = 'block_{:0>2d}_{:0>2d}'.format(i, j)
+        block_name = 'stack_{:d}_block_{:d}'.format(i + 1, j + 1)
 
         ##### Update per-block config
         # No pooling if not the first block in the stage
@@ -1186,7 +1188,7 @@ class MaxViT(tf.keras.layers.Layer):
         axis=-1,
         epsilon=config.ln_epsilon,
         dtype=config.ln_dtype,
-        name='final_layer_norm')
+        name='post_ln')
 
     # Classification head
     cls_layers = []
@@ -1200,7 +1202,7 @@ class MaxViT(tf.keras.layers.Layer):
           cls_hsize,
           kernel_initializer=self._config.kernel_initializer,
           bias_initializer=self._config.bias_initializer,
-          name='inner_dense')
+          name='features')
       cls_layers.append(inner_dense)
       cls_layers.append(tf.keras.layers.Activation(tf.nn.tanh, name='tanh'))
 
@@ -1208,7 +1210,7 @@ class MaxViT(tf.keras.layers.Layer):
         self._config.num_classes,
         kernel_initializer=self._config.kernel_initializer,
         bias_initializer=tf.constant_initializer(self._config.cls_bias_init),
-        name='logit_dense')
+        name='predictions')
     cls_layers.append(logit_dense)
 
     self._cls_head = tf.keras.Sequential(
