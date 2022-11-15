@@ -85,8 +85,8 @@ class MaxViTLarge(MaxViTI1KBase):
 
 
 @register
-class MaxViTXLarge(vision_i1k.MaxViTI1KBase):
-    cfg = copy.deepcopy(vision_i1k.MaxViTI1KBase.cfg)
+class MaxViTXLarge(MaxViTI1KBase):
+    cfg = copy.deepcopy(MaxViTI1KBase.cfg)
     cfg.model.update(vision.maxvit_xl)
     cfg.model.survival_prob = 0.4
 
